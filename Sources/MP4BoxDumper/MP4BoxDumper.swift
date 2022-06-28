@@ -1,13 +1,24 @@
 import Foundation
 
 public class MP4BoxDumper {
-  private let url: URL
+  private let url: URL?
+    public var mediaData: Data = Data()
+    public var structureDescription: String = ""
   
   public init(url: URL) {
     self.url = url
   }
+    
+    public init(data: Data) {
+        url = nil
+        let stream = InputStream(data: data)
+        stream.open()
+        dumpBox(stream: stream, indent: 0)
+        stream.close()
+    }
   
   public func dumpBox() {
+      guard let url = url else { return }
     let stream = InputStream(url: url)!
     stream.open()
     dumpBox(stream: stream, indent: 0)
@@ -15,16 +26,23 @@ public class MP4BoxDumper {
   }
   
   private func dumpBox(stream: InputStream, indent: Int) {
+      var offsetAfterRead = 0
     var indent = indent
     while stream.hasBytesAvailable {
-      let (size, _) = stream.read(maxLength: 4)
+        offsetAfterRead += 4
+      let (size, _) = stream.read(maxLength: offsetAfterRead)
       let boxSize = size.uint32Value
       guard boxSize > 8 else { continue }
-      guard let typeString = stream.readAsciiString(length: 4) else { return }
+        offsetAfterRead += 4
+      guard let typeString = stream.readAsciiString(length: offsetAfterRead) else { return }
       let indentString = (0..<indent).map({ _ in " "}).reduce("", +)
-      print("\(indentString)\(typeString)(\(boxSize))")
+//      print("\(indentString)\(typeString)(\(boxSize))")
+        let boxDescription = "\(indentString)\(typeString)(o:\(offsetAfterRead)\ts:\(boxSize))\n"
+        structureDescription.append(contentsOf: boxDescription)
       let (data, _) = stream.read(maxLength: Int(boxSize - 8))
-      
+        if typeString == "mdat" {
+            mediaData.append(contentsOf: data)
+        }
       switch typeString {
       case "ftyp":
         dumpftyp(data: Data(bytes: data))
@@ -47,12 +65,14 @@ public class MP4BoxDumper {
     let stream = InputStream(data: data)
     stream.open()
     if let major = stream.readAsciiString(length: 4) {
-      print(" Major Brand: \(major)")
+        structureDescription.append(contentsOf: " Major Brand: \(major)\n")
+//      print(" Major Brand: \(major)")
     }
     stream.skip(length: 4)
     while stream.hasBytesAvailable {
       if let comp = stream.readAsciiString(length: 4) {
-        print(" Compatible Brand: \(comp)")
+          structureDescription.append(contentsOf: " Compatible Brand: \(comp)\n")
+//        print(" Compatible Brand: \(comp)")
       }
     }
     stream.close()
