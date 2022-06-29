@@ -28,4 +28,7 @@ extension Array where Element == UInt8 {
   var uint32Value: UInt32 {
     return UInt32(bigEndian: Data(bytes: self).withUnsafeBytes { $0.pointee })
   }
+    var uint64Value: UInt64 {
+      return UInt64(bigEndian: Data(bytes: self).withUnsafeBytes { $0.pointee })
+    }
 }
