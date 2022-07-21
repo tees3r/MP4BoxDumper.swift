@@ -1,4 +1,148 @@
 import Foundation
+import UIKit
+
+public class MP4BoxDumper {
+    private let url: URL?
+    public var mediaData: Data?
+    public var structureDescription: String = ""
+    public var avcC: Data?
+    public var trun: Data?
+    public var timestamp: UInt64?
+    public var sampleDuration: UInt64 = 3600 // read from trun box
+    
+    public init(url: URL) {
+        self.url = url
+    }
+    
+    public init(data: Data) {
+        url = nil
+        let stream = InputStream(data: data)
+        stream.open()
+        dumpBox(stream: stream, indent: 0)
+        stream.close()
+    }
+    
+    public func dumpBox() {
+        guard let url = url else { return }
+        let stream = InputStream(url: url)!
+        stream.open()
+        dumpBox(stream: stream, indent: 0)
+        stream.close()
+    }
+    
+    private func dumpBox(stream: InputStream, indent: Int, offsetAfterRead: Int = 0) {
+        var offsetToApply = offsetAfterRead
+        var indent = indent
+        while stream.hasBytesAvailable {
+            var headerSize = 8
+            offsetToApply += 4
+            let (size, _) = stream.read(maxLength: 4)
+            var boxSize: UInt64 = UInt64(size.uint32Value)
+            
+            if boxSize == 1 {
+                offsetToApply += 8
+                headerSize += 8
+                let (size, _) = stream.read(maxLength: 8)
+                boxSize = size.uint64Value
+            }
+            
+            if boxSize == 0 {
+                offsetToApply += 4
+                let (_, _) = stream.read(maxLength: 4) // read type which is to be ignored
+                continue
+            }
+            
+            guard boxSize > 8 else { continue }
+            
+            offsetToApply += 4
+            guard let typeString = stream.readAsciiString(length: 4) else { return }
+            let indentString = (0..<indent).map({ _ in " "}).reduce("", +)
+            let boxDescription = "\(indentString)\(typeString)(start:\(offsetAfterRead)\tsize:\(boxSize))\n"
+            structureDescription.append(contentsOf: boxDescription)
+
+            let (data, _) = stream.read(maxLength: Int(boxSize) - headerSize)
+                        
+            switch typeString {
+            case "mdat":
+                mediaData = Data(data)
+            case "ftyp":
+                dumpftyp(data: Data(data))
+            case "avc1":
+                dumpAVC1(data: Data(data))
+            case "moov", "trak", "mdia", "minf", "stbl", "edts",
+                "mp4v", "s263",
+                "mp4a",
+                "esds",
+                "stsd",
+                "moof", "traf":
+                indent += 1
+                let nextInputStream = InputStream(data: Data(data))
+                nextInputStream.open()
+                dumpBox(stream: nextInputStream, indent: indent, offsetAfterRead: offsetToApply )
+                indent -= 1
+                nextInputStream.close()
+            case "tfdt":
+                timestamp = dumptfdt(data: Data(data))
+            default: break
+            }
+            offsetToApply += (Int(boxSize) - headerSize)
+        }
+    }
+    
+    private func dumpAVC1(data: Data) {
+        // (▀̿Ĺ̯▀̿ ̿) mp4 box killer
+        for (index, _) in data.enumerated() {
+            if data.indices.contains(index + 3),
+               Array(data[index...index + 3]) == [97, 118, 99, 67], // avcC
+               data.indices.contains(index - 4){
+                let boxSize = Array(data[index - 4...index]).uint32Value
+                let startIndex = index+4
+                let endIndex = startIndex + Int(boxSize) - 8
+                guard data.indices.contains(startIndex),
+                      data.indices.contains(endIndex) else { return }
+                
+                avcC = Data(data[startIndex...endIndex])
+            }
+        }
+    }
+    
+    // fragment display time - timestamp
+    private func dumptfdt(data: Data) -> UInt64 {
+        var result: UInt64 = 0
+        let stream = InputStream(data: data)
+        stream.open()
+        let (size, _) = stream.read(maxLength: 4)
+        if size.uint32Value == 0x1000000 {
+            let (timestamp, _) = stream.read(maxLength: 8)
+            result = timestamp.uint64Value
+        } else {
+            let (timestamp, _) = stream.read(maxLength: 4)
+            result = timestamp.uint64Value
+        }
+        
+        stream.close()
+        return result
+    }
+    
+    private func dumpftyp(data: Data) {
+        let stream = InputStream(data: data)
+        stream.open()
+        if let major = stream.readAsciiString(length: 4) {
+            structureDescription.append(contentsOf: " Major Brand: \(major)\n")
+            //      print(" Major Brand: \(major)")
+        }
+        stream.skip(length: 4)
+        while stream.hasBytesAvailable {
+            if let comp = stream.readAsciiString(length: 4) {
+                structureDescription.append(contentsOf: " Compatible Brand: \(comp)\n")
+                //        print(" Compatible Brand: \(comp)")
+            }
+        }
+        stream.close()
+    }
+}
+
+// MARK: - avcC
 
 public struct AVCDecoderConfigurationRecord {
     /*
@@ -67,12 +211,8 @@ public struct AVCDecoderConfigurationRecord {
     public let pictureParameterSetNALUnits: [[UInt8]]
 }
 
-public class MP4BoxDumper {
-    private let url: URL?
-    public var mediaData: Data?
-    public var structureDescription: String = ""
-    public var avcC: Data?
-    public var avcDecoderConfigurationRecord: AVCDecoderConfigurationRecord? {
+public extension MP4BoxDumper {
+    var avcDecoderConfigurationRecord: AVCDecoderConfigurationRecord? {
         guard let avcC = avcC else { return nil }
         let stream = InputStream(data: avcC)
         stream.open()
@@ -144,113 +284,5 @@ public class MP4BoxDumper {
             numOfPictureParameterSets: numOfPictureParameterSets,
             pictureParameterSetLengths: pictureParameterSetLengths,
             pictureParameterSetNALUnits: pictureParameterSetNALUnits)
-    }
-    
-    public init(url: URL) {
-        self.url = url
-    }
-    
-    public init(data: Data) {
-        url = nil
-        let stream = InputStream(data: data)
-        stream.open()
-        dumpBox(stream: stream, indent: 0)
-        stream.close()
-    }
-    
-    public func dumpBox() {
-        guard let url = url else { return }
-        let stream = InputStream(url: url)!
-        stream.open()
-        dumpBox(stream: stream, indent: 0)
-        stream.close()
-    }
-    
-    private func dumpBox(stream: InputStream, indent: Int, offsetAfterRead: Int = 0) {
-        var offsetToApply = offsetAfterRead
-        var indent = indent
-        while stream.hasBytesAvailable {
-            var headerSize = 8
-            offsetToApply += 4
-            let (size, _) = stream.read(maxLength: 4)
-            var boxSize: UInt64 = UInt64(size.uint32Value)
-            if boxSize == 1 {
-                offsetToApply += 8
-                headerSize += 8
-                let (size, _) = stream.read(maxLength: 8)
-                boxSize = size.uint64Value
-            }
-            
-            if boxSize == 0 {offsetToApply += 4
-                let (_, _) = stream.read(maxLength: 4) // read type which is to be ignored
-                continue
-            }
-            
-            guard boxSize > 8 else { continue }
-            
-            offsetToApply += 4
-            guard let typeString = stream.readAsciiString(length: 4) else { return }
-            let indentString = (0..<indent).map({ _ in " "}).reduce("", +)
-            let boxDescription = "\(indentString)\(typeString)(start:\(offsetAfterRead)\tsize:\(boxSize))\n"
-            structureDescription.append(contentsOf: boxDescription)
-
-            let (data, _) = stream.read(maxLength: Int(boxSize) - headerSize)
-            if typeString == "mdat" {
-                mediaData = Data(data)
-            }
-            switch typeString {
-            case "ftyp":
-                dumpftyp(data: Data(bytes: data))
-            case "avc1":
-                dumpAVC1(data: Data(bytes: data))
-            case "moov", "trak", "mdia", "minf", "stbl", "edts",
-                "mp4v", "s263",
-                "mp4a",
-                "esds",
-                "stsd":
-                indent += 1
-                let nextInputStream = InputStream(data: Data(bytes: data))
-                nextInputStream.open()
-                dumpBox(stream: nextInputStream, indent: indent, offsetAfterRead: offsetToApply )
-                indent -= 1
-                nextInputStream.close()
-            default: break
-            }
-            offsetToApply += (Int(boxSize) - headerSize)
-        }
-    }
-    
-    private func dumpAVC1(data: Data) {
-        // (▀̿Ĺ̯▀̿ ̿) mp4 box killer
-        for (index, _) in data.enumerated() {
-            if data.indices.contains(index + 3),
-               Array(data[index...index + 3]) == [97, 118, 99, 67], // avcC
-               data.indices.contains(index - 4){
-                let boxSize = Array(data[index - 4...index]).uint32Value
-                let startIndex = index+4
-                let endIndex = startIndex + Int(boxSize) - 8
-                guard data.indices.contains(startIndex),
-                      data.indices.contains(endIndex) else { return }
-                
-                avcC = Data(data[startIndex...endIndex])
-            }
-        }
-    }
-    
-    private func dumpftyp(data: Data) {
-        let stream = InputStream(data: data)
-        stream.open()
-        if let major = stream.readAsciiString(length: 4) {
-            structureDescription.append(contentsOf: " Major Brand: \(major)\n")
-            //      print(" Major Brand: \(major)")
-        }
-        stream.skip(length: 4)
-        while stream.hasBytesAvailable {
-            if let comp = stream.readAsciiString(length: 4) {
-                structureDescription.append(contentsOf: " Compatible Brand: \(comp)\n")
-                //        print(" Compatible Brand: \(comp)")
-            }
-        }
-        stream.close()
     }
 }
